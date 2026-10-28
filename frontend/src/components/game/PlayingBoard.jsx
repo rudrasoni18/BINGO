@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import socket from '../../socket';
 import { useGame } from '../../context/GameContext';
 import BingoCell from './BingoCell';
@@ -92,14 +92,19 @@ export default function PlayingBoard() {
   }, [myBoard, calledSet, gridSize, N2]);
 
   const hasEnoughLines = myLines >= (room?.targetLines || 3);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleCellClick = useCallback((idx) => {
-    if (!isMyTurn) return;
+    if (!isMyTurn || isSubmitting) return;
     const num = myBoard[idx];
     if (!num || calledSet.has(num)) return;
+    setIsSubmitting(true);
     soundEngine.playButtonClickSound();
     socket.emit('pick_number', { number: num });
-  }, [isMyTurn, myBoard, calledSet]);
+    setTimeout(() => {
+      setIsSubmitting(false);
+    }, 400);
+  }, [isMyTurn, isSubmitting, myBoard, calledSet]);
 
   const handleClaimBingo = useCallback(() => {
     soundEngine.init();
@@ -288,7 +293,7 @@ export default function PlayingBoard() {
                   callerLabel={callerLabel}
                   isInCompletedLine={completedCells.has(idx)}
                   isSelected={false}
-                  isMyTurn={isMyTurn}
+                  isMyTurn={isMyTurn && !isSubmitting}
                   mode="playing"
                   gridSize={gridSize}
                   onClick={() => handleCellClick(idx)}

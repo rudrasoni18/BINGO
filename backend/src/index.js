@@ -1,3 +1,6 @@
+process.on('uncaughtException', (err) => console.error('Uncaught Exception caught:', err));
+process.on('unhandledRejection', (reason, promise) => console.error('Unhandled Rejection at:', promise, 'reason:', reason));
+
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
@@ -19,8 +22,8 @@ const io = new Server(server, {
     origin: CLIENT_URL,
     methods: ['GET', 'POST'],
   },
-  pingTimeout: 20000,
   pingInterval: 10000,
+  pingTimeout: 30000,
 });
 
 // In-memory rooms store: Map<roomId, RoomState>

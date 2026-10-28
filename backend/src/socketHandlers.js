@@ -305,51 +305,61 @@ module.exports = function registerHandlers(io, rooms) {
     });
 
     // ─────────────────────────────────────────────
-    // PICK NUMBER (current turn player)
+    // PICK NUMBER (current turn player with Atomic Turn Guard)
     // ─────────────────────────────────────────────
     socket.on('pick_number', ({ number } = {}) => {
       const room = getRoomForSocket(socket, rooms);
       if (!room) return;
       if (room.state !== 'playing') return emitError(socket, 'Game is not in playing state.');
 
-      const currentPlayer = getCurrentTurnPlayer(room);
-      if (!currentPlayer || currentPlayer.id !== socket.id)
-        return emitError(socket, "It's not your turn.");
+      // Atomic Turn Guard & anti-spam lock
+      if (room.isProcessingMove || room.players[room.currentTurnIndex]?.id !== socket.id) return;
+      room.isProcessingMove = true;
 
-      const num = Number(number);
-      const N2 = room.gridSize * room.gridSize;
-      if (!Number.isInteger(num) || num < 1 || num > N2)
-        return emitError(socket, 'Invalid number.');
-      if (room.calledNumbers.includes(num))
-        return emitError(socket, 'Number already called.');
+      try {
+        const currentPlayer = getCurrentTurnPlayer(room);
+        if (!currentPlayer || currentPlayer.id !== socket.id)
+          return emitError(socket, "It's not your turn.");
 
-      if (!currentPlayer.board.includes(num))
-        return emitError(socket, 'That number is not on your board.');
+        const num = Number(number);
+        const N2 = room.gridSize * room.gridSize;
+        if (!Number.isInteger(num) || num < 1 || num > N2)
+          return emitError(socket, 'Invalid number.');
+        if (room.calledNumbers.includes(num))
+          return emitError(socket, 'Number already called.');
 
-      room.calledNumbers.push(num);
+        if (!currentPlayer?.board?.includes(num))
+          return emitError(socket, 'That number is not on your board.');
 
-      // Update lines for all players
-      room.players.forEach((p) => {
-        p.linesCompleted = computeLines(p.board, room.calledNumbers, room.gridSize);
-      });
+        room.calledNumbers.push(num);
 
-      advanceTurn(room);
+        // Update lines for all players safely
+        room.players.forEach((p) => {
+          if (p?.board) {
+            p.linesCompleted = computeLines(p.board, room.calledNumbers, room.gridSize);
+          }
+        });
 
-      const publicRoom = buildPublicRoomState(room);
-      io.to(room.roomId).emit('number_called', {
-        number: num,
-        calledBy: currentPlayer.nickname,
-        room: publicRoom,
-      });
+        advanceTurn(room);
 
-      // Check if any bot completed targetLines:
-      const winningBot = room.players.find((p) => p.isBot && p.linesCompleted >= room.targetLines);
-      if (winningBot) {
-        triggerBotBingo(io, room, winningBot);
-        return;
+        const publicRoom = buildPublicRoomState(room);
+        io.to(room.roomId).emit('number_called', {
+          number: num,
+          calledBy: currentPlayer?.nickname || 'Player',
+          room: publicRoom,
+        });
+
+        // Check if any bot completed targetLines:
+        const winningBot = room.players.find((p) => p.isBot && p.linesCompleted >= room.targetLines);
+        if (winningBot) {
+          triggerBotBingo(io, room, winningBot);
+          return;
+        }
+
+        checkAndScheduleBotTurn(io, room);
+      } finally {
+        room.isProcessingMove = false;
       }
-
-      checkAndScheduleBotTurn(io, room);
     });
 
     // ─────────────────────────────────────────────
@@ -486,13 +496,13 @@ module.exports = function registerHandlers(io, rooms) {
     // ─────────────────────────────────────────────
     socket.on('disconnect', () => {
       console.log(`[disconnect] ${socket.id}`);
-      const roomId = socket.data.roomId;
+      const roomId = socket.data?.roomId;
       if (!roomId) return;
 
       const room = rooms.get(roomId);
       if (!room) return;
 
-      const player = room.players.find((p) => p.id === socket.id);
+      const player = room?.players?.find((p) => p.id === socket.id);
       if (!player) return;
 
       if (room.state === 'lobby') {
@@ -508,12 +518,12 @@ module.exports = function registerHandlers(io, rooms) {
         io.to(roomId).emit('room_updated', { room: buildPublicRoomState(room) });
         io.to(roomId).emit('player_disconnected', {
           playerId: socket.id,
-          nickname: player.nickname,
+          nickname: player?.nickname || 'Player',
           room: buildPublicRoomState(room),
         });
       } else {
         player.connected = false;
-        const connectedPlayers = room.players.filter((p) => p.connected);
+        const connectedPlayers = room?.players?.filter((p) => p?.connected) || [];
 
         if (connectedPlayers.length < 2 && room.state === 'playing') {
           room.state = 'finished';
@@ -525,7 +535,7 @@ module.exports = function registerHandlers(io, rooms) {
           const lastPlayer = connectedPlayers[0];
           if (lastPlayer) {
             room.winnerId = lastPlayer.id;
-            room.winner = { id: lastPlayer.id, nickname: lastPlayer.nickname, linesCount: lastPlayer.linesCompleted };
+            room.winner = { id: lastPlayer.id, nickname: lastPlayer.nickname, linesCount: lastPlayer?.linesCompleted || 0 };
           }
           io.to(roomId).emit('bingo_claimed', {
             winner: room.winner,
@@ -540,7 +550,7 @@ module.exports = function registerHandlers(io, rooms) {
           }
           io.to(roomId).emit('player_disconnected', {
             playerId: socket.id,
-            nickname: player.nickname,
+            nickname: player?.nickname || 'Player',
             room: buildPublicRoomState(room),
           });
         }
@@ -598,41 +608,48 @@ function checkAndScheduleBotTurn(io, room) {
 }
 
 function executeBotMove(io, room, bot) {
-  if (room.state !== 'playing') return;
+  if (room.state !== 'playing' || room.isProcessingMove) return;
   const currentTurnPlayer = getCurrentTurnPlayer(room);
   if (!currentTurnPlayer || currentTurnPlayer.id !== bot.id) return;
 
-  const num = chooseNumber(bot, room);
-  if (!num) return;
+  room.isProcessingMove = true;
+  try {
+    const num = chooseNumber(bot, room);
+    if (!num) return;
 
-  room.calledNumbers.push(num);
+    room.calledNumbers.push(num);
 
-  room.players.forEach((p) => {
-    p.linesCompleted = computeLines(p.board, room.calledNumbers, room.gridSize);
-  });
+    room.players.forEach((p) => {
+      if (p?.board) {
+        p.linesCompleted = computeLines(p.board, room.calledNumbers, room.gridSize);
+      }
+    });
 
-  const publicRoom = buildPublicRoomState(room);
-  io.to(room.roomId).emit('number_called', {
-    number: num,
-    calledBy: bot.nickname,
-    room: publicRoom,
-  });
+    const publicRoom = buildPublicRoomState(room);
+    io.to(room.roomId).emit('number_called', {
+      number: num,
+      calledBy: bot?.nickname || 'Bot',
+      room: publicRoom,
+    });
 
-  if (bot.linesCompleted >= room.targetLines) {
-    triggerBotBingo(io, room, bot);
-    return;
+    if (bot.linesCompleted >= room.targetLines) {
+      triggerBotBingo(io, room, bot);
+      return;
+    }
+
+    advanceTurn(room);
+
+    const otherWinningBot = room.players.find((p) => p.isBot && p.linesCompleted >= room.targetLines);
+    if (otherWinningBot) {
+      triggerBotBingo(io, room, otherWinningBot);
+      return;
+    }
+
+    io.to(room.roomId).emit('room_updated', { room: buildPublicRoomState(room) });
+    checkAndScheduleBotTurn(io, room);
+  } finally {
+    room.isProcessingMove = false;
   }
-
-  advanceTurn(room);
-
-  const otherWinningBot = room.players.find((p) => p.isBot && p.linesCompleted >= room.targetLines);
-  if (otherWinningBot) {
-    triggerBotBingo(io, room, otherWinningBot);
-    return;
-  }
-
-  io.to(room.roomId).emit('room_updated', { room: buildPublicRoomState(room) });
-  checkAndScheduleBotTurn(io, room);
 }
 
 function triggerBotBingo(io, room, bot) {
