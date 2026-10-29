@@ -305,7 +305,7 @@ function chooseNumber(bot, room) {
  * Natural pacing delay: 1.2s to 1.8s
  */
 function getBotThinkingDelay() {
-  return Math.floor(1200 + Math.random() * 600);
+  return Math.floor(800 + Math.random() * 600);
 }
 
 module.exports = {
